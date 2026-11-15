@@ -7,7 +7,8 @@
 <style>
   html, body { margin: 0; background: transparent; font-family: sans-serif; }
   #estado { color: #fff; font-size: 12px; padding: 4px 8px; opacity: .8; display: none; }
-  body.debug #estado { display: block; }
+  body.debug { background: #111; min-height: 100vh; }
+  body.debug #estado { display: block; font-size: 16px; }
   #activar { display: none; position: fixed; inset: 0; background: #000c; color: #fff;
              font-size: 22px; align-items: center; justify-content: center; cursor: pointer; }
 </style>
@@ -79,7 +80,8 @@ function next() {
   audio.volume = VOLUME;
   const done = () => { playing = false; next(); };
   audio.onended = done;
-  audio.onerror = done;
+  audio.onerror = () => { log('Error de audio con la voz ' + VOICE + ' (probá otra voz)'); done(); };
+  log('Leyendo: ' + text);
   audio.play().catch(() => {
     // navegador normal sin interacción previa: pedir click (en OBS no pasa)
     const btn = document.getElementById('activar');

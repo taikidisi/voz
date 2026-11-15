@@ -33,6 +33,7 @@
     ignore=user1,user2 usuarios a ignorar
     only=all|subs|mods  quién se lee (por defecto all)
     links=0            1 = leer links (por defecto se ignoran los mensajes con links)
+    engine=google      fuerza un solo servicio de voz: google (siempre la misma voz) o se (StreamElements); por defecto auto
     lang=es            idioma para los servicios de respaldo (Google / voz del navegador)
     debug=1            muestra el estado en pantalla
 */
@@ -46,6 +47,7 @@ const SAYNAME = P.get('name') === '1';
 const ONLY    = (P.get('only') || 'all').toLowerCase();
 const READLINKS = P.get('links') === '1';
 const LANG    = P.get('lang') || 'es';
+const ENGINE  = (P.get('engine') || 'auto').toLowerCase();   // auto | google | se
 const list = s => (s || '').toLowerCase().split(',').map(x => x.trim()).filter(Boolean);
 
 const BOTS = new Set([
@@ -79,10 +81,13 @@ function sources(text) {
              encodeURIComponent(VOICE) + '&text=' + encodeURIComponent(text);
   const gg = 'https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&tl=' +
              encodeURIComponent(LANG) + '&q=' + encodeURIComponent(text);
-  return [
+  const all = [
     { name: 'StreamElements', url: se },
     { name: 'Google', url: gg }
   ];
+  if (ENGINE === 'google') return [all[1]];
+  if (ENGINE === 'se') return [all[0]];
+  return all;
 }
 
 function speak(text, done) {   // último recurso: voz del navegador

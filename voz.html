@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>TTS Chat</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  html, body { margin: 0; background: transparent; font-family: sans-serif; }
+  #estado { color: #fff; font-size: 12px; padding: 4px 8px; opacity: .8; display: none; }
+  body.debug #estado { display: block; }
+  #activar { display: none; position: fixed; inset: 0; background: #000c; color: #fff;
+             font-size: 22px; align-items: center; justify-content: center; cursor: pointer; }
+</style>
+</head>
+<body>
+<div id="estado">iniciando...</div>
+<div id="activar">Click para activar el audio</div>
+
+<script>
+/*
+  TTS de chat de Twitch para OBS (fuente de navegador). No instala nada.
+
+  Uso (parámetros en la URL):
+    tts-chat.html?channel=taiki_02
+  Opcionales:
+    voice=Brian        voz de StreamElements (Brian, Amy, Emma, Joanna, Miguel, Penelope, Lupe, Mia, Enrique, Conchita...)
+    volume=1           0 a 1
+    maxlen=200         máximo de caracteres por mensaje (corta el resto)
+    maxqueue=5         si hay más mensajes esperando que esto, se descartan los nuevos
+    name=1             1 = dice "usuario dice ..." / 0 = lee solo el mensaje
+    bots=bot1,bot2     bots extra a ignorar (se suman a la lista por defecto)
+    ignore=user1,user2 usuarios a ignorar
+    only=all|subs|mods  quién se lee (por defecto all)
+    links=0            1 = leer links (por defecto se ignoran los mensajes con links)
+    debug=1            muestra el estado en pantalla
+*/
+const P = new URLSearchParams(location.search);
+const CHANNEL = (P.get('channel') || '').toLowerCase().replace('#', '');
+const VOICE   = P.get('voice') || 'Brian';
+const VOLUME  = Math.min(1, Math.max(0, parseFloat(P.get('volume') || '1')));
+const MAXLEN  = parseInt(P.get('maxlen') || '200', 10);
+const MAXQ    = parseInt(P.get('maxqueue') || '5', 10);
+const SAYNAME = P.get('name') === '1';
+const ONLY    = (P.get('only') || 'all').toLowerCase();
+const READLINKS = P.get('links') === '1';
+const list = s => (s || '').toLowerCase().split(',').map(x => x.trim()).filter(Boolean);
+
+const BOTS = new Set([
+  'nightbot','streamelements','streamlabs','moobot','fossabot','wizebot','sery_bot',
+  'commanderroot','soundalerts','pokemoncommunitygame','streamlabsbot','lurxx','botrix',
+  'tangiabot','coebot','deepbot','ankhbot','vivbot','stay_hydrated_bot','anotherttvviewer',
+  ...list(P.get('bots'))
+]);
+const IGNORED = new Set(list(P.get('ignore')));
+
+const estado = document.getElementById('estado');
+if (P.get('debug') === '1') document.body.classList.add('debug');
+const log = t => { estado.textContent = t; };
+
+if (!CHANNEL) { document.body.classList.add('debug'); log('Falta ?channel=tu_canal en la URL'); throw new Error('sin channel'); }
+
+/* ---------- cola de audio ---------- */
+const queue = [];
+let playing = false;
+
+function enqueue(text) {
+  if (queue.length >= MAXQ) return;
+  queue.push(text);
+  next();
+}
+
+function next() {
+  if (playing || !queue.length) return;
+  playing = true;
+  const text = queue.shift();
+  const url = 'https://api.streamelements.com/kappa/v2/speech?voice=' +
+              encodeURIComponent(VOICE) + '&text=' + encodeURIComponent(text);
+  const audio = new Audio(url);
+  audio.volume = VOLUME;
+  const done = () => { playing = false; next(); };
+  audio.onended = done;
+  audio.onerror = done;
+  audio.play().catch(() => {
+    // navegador normal sin interacción previa: pedir click (en OBS no pasa)
+    const btn = document.getElementById('activar');
+    btn.style.display = 'flex';
+    btn.onclick = () => { btn.style.display = 'none'; audio.play().then(() => {}, done); };
+  });
+}
+
+/* ---------- limpieza del mensaje ---------- */
+function removeEmotes(msg, emotesTag) {
+  if (!emotesTag) return msg;
+  const ranges = [];
+  emotesTag.split('/').forEach(e => {
+    const pos = e.split(':')[1];
+    if (!pos) return;
+    pos.split(',').forEach(r => {
+      const [a, b] = r.split('-').map(Number);
+      ranges.push([a, b]);
+    });
+  });
+  ranges.sort((x, y) => y[0] - x[0]);
+  const chars = Array.from(msg);
+  ranges.forEach(([a, b]) => chars.splice(a, b - a + 1, ' '));
+  return chars.join('');
+}
+
+function clean(msg) {
+  return msg
+    .replace(/(.)\1{4,}/g, '$1$1$1')       // letras repetidas (holaaaaaaa -> holaaa)
+    .replace(/[\u0000-\u001f]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, MAXLEN);
+}
+
+const LINK_RE = /(https?:\/\/|www\.|\b[a-z0-9-]+\.(com|net|org|tv|gg|ly|io|ar|me|xyz)\b)/i;
+
+/* ---------- chat de Twitch (anónimo, solo lectura) ---------- */
+function parseTags(raw) {
+  const t = {};
+  raw.slice(1).split(';').forEach(kv => {
+    const i = kv.indexOf('=');
+    t[kv.slice(0, i)] = kv.slice(i + 1);
+  });
+  return t;
+}
+
+function handle(line) {
+  if (line.startsWith('PING')) { ws.send('PONG :tmi.twitch.tv'); return; }
+  if (!line.includes(' PRIVMSG ')) return;
+
+  let tags = {}, rest = line;
+  if (line[0] === '@') {
+    const sp = line.indexOf(' ');
+    tags = parseTags(line.slice(0, sp));
+    rest = line.slice(sp + 1);
+  }
+  const m = rest.match(/^:([^!]+)![^ ]+ PRIVMSG #[^ ]+ :(.*)$/);
+  if (!m) return;
+
+  const user = m[1].toLowerCase();
+  let msg = m[2];
+  const display = tags['display-name'] || user;
+
+  if (msg.startsWith('\u0001ACTION ')) msg = msg.replace(/^\u0001ACTION /, '').replace(/\u0001$/, '');
+
+  // filtros
+  if (BOTS.has(user) || IGNORED.has(user)) return;
+  if (msg.trim().startsWith('!')) return;                    // comandos
+  if (tags['bits'] && false) return;
+  const badges = tags['badges'] || '';
+  const isMod = tags['mod'] === '1' || badges.includes('broadcaster');
+  const isSub = tags['subscriber'] === '1' || badges.includes('founder');
+  if (ONLY === 'mods' && !isMod) return;
+  if (ONLY === 'subs' && !(isMod || isSub)) return;
+  if (!READLINKS && LINK_RE.test(msg)) return;
+
+  msg = clean(removeEmotes(msg, tags['emotes']));
+  if (!msg || !/[a-zA-Z0-9\u00C0-\u024F]/.test(msg)) return; // vacío o solo símbolos
+
+  enqueue(SAYNAME ? display + ' dice ' + msg : msg);
+}
+
+let ws, retry = 0;
+function connect() {
+  ws = new WebSocket('wss://irc-ws.chat.twitch.tv:443');
+  ws.onopen = () => {
+    ws.send('CAP REQ :twitch.tv/tags twitch.tv/commands');
+    ws.send('PASS SCHMOOPIIE');
+    ws.send('NICK justinfan' + Math.floor(10000 + Math.random() * 89999));
+    ws.send('JOIN #' + CHANNEL);
+    retry = 0;
+    log('Conectado al chat de ' + CHANNEL);
+  };
+  ws.onmessage = ev => ev.data.split('\r\n').filter(Boolean).forEach(handle);
+  ws.onclose = () => {
+    log('Desconectado, reintentando...');
+    setTimeout(connect, Math.min(15000, 1000 * ++retry));
+  };
+  ws.onerror = () => ws.close();
+}
+connect();
+</script>
+</body>
+</html>

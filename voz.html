@@ -33,6 +33,7 @@
     ignore=user1,user2 usuarios a ignorar
     only=all|subs|mods  quién se lee (por defecto all)
     links=0            1 = leer links (por defecto se ignoran los mensajes con links)
+    lang=es            idioma para los servicios de respaldo (Google / voz del navegador)
     debug=1            muestra el estado en pantalla
 */
 const P = new URLSearchParams(location.search);
@@ -44,6 +45,7 @@ const MAXQ    = parseInt(P.get('maxqueue') || '5', 10);
 const SAYNAME = P.get('name') === '1';
 const ONLY    = (P.get('only') || 'all').toLowerCase();
 const READLINKS = P.get('links') === '1';
+const LANG    = P.get('lang') || 'es';
 const list = s => (s || '').toLowerCase().split(',').map(x => x.trim()).filter(Boolean);
 
 const BOTS = new Set([
@@ -70,24 +72,58 @@ function enqueue(text) {
   next();
 }
 
+let preferred = 0;   // recuerda qué servicio de voz funcionó la última vez
+
+function sources(text) {
+  const se = 'https://api.streamelements.com/kappa/v2/speech?voice=' +
+             encodeURIComponent(VOICE) + '&text=' + encodeURIComponent(text);
+  const gg = 'https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&tl=' +
+             encodeURIComponent(LANG) + '&q=' + encodeURIComponent(text);
+  return [
+    { name: 'StreamElements', url: se },
+    { name: 'Google', url: gg }
+  ];
+}
+
+function speak(text, done) {   // último recurso: voz del navegador
+  if (!('speechSynthesis' in window)) { log('No se pudo reproducir el audio'); return done(); }
+  log('Leyendo (voz del navegador): ' + text);
+  const u = new SpeechSynthesisUtterance(text);
+  u.lang = LANG; u.volume = VOLUME;
+  u.onend = u.onerror = done;
+  speechSynthesis.speak(u);
+}
+
 function next() {
   if (playing || !queue.length) return;
   playing = true;
   const text = queue.shift();
-  const url = 'https://api.streamelements.com/kappa/v2/speech?voice=' +
-              encodeURIComponent(VOICE) + '&text=' + encodeURIComponent(text);
-  const audio = new Audio(url);
-  audio.volume = VOLUME;
+  const srcs = sources(text);
+  const order = srcs.map((_, i) => (i + preferred) % srcs.length);
   const done = () => { playing = false; next(); };
-  audio.onended = done;
-  audio.onerror = () => { log('Error de audio con la voz ' + VOICE + ' (probá otra voz)'); done(); };
-  log('Leyendo: ' + text);
-  audio.play().catch(() => {
-    // navegador normal sin interacción previa: pedir click (en OBS no pasa)
-    const btn = document.getElementById('activar');
-    btn.style.display = 'flex';
-    btn.onclick = () => { btn.style.display = 'none'; audio.play().then(() => {}, done); };
-  });
+
+  const attempt = k => {
+    if (k >= order.length) { speak(text, done); return; }
+    const src = srcs[order[k]];
+    const audio = new Audio(src.url);
+    audio.volume = VOLUME;
+    let failed = false;
+    const fail = () => { if (failed) return; failed = true; attempt(k + 1); };
+    audio.onerror = fail;
+    audio.onplaying = () => { preferred = order[k]; log('Leyendo (' + src.name + '): ' + text); };
+    audio.onended = done;
+    audio.play().catch(err => {
+      if (err && err.name === 'NotAllowedError') {
+        // navegador normal sin interacción previa: pedir click (en OBS no pasa)
+        const btn = document.getElementById('activar');
+        btn.style.display = 'flex';
+        btn.onclick = () => { btn.style.display = 'none'; audio.play().catch(fail); };
+      } else {
+        fail();
+      }
+    });
+  };
+  attempt(0);
 }
 
 /* ---------- limpieza del mensaje ---------- */

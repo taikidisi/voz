@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>Voz del chat (Twitch + Kick)</title>
+<style>
+  html, body { margin: 0; background: transparent; color: #fff; font: 14px sans-serif; }
+  #st { position: fixed; left: 6px; bottom: 6px; opacity: .75; font-size: 12px; text-shadow: 0 0 3px #000; }
+</style>
+</head>
+<body>
+<div id="st"></div>
+<script>
+/*
+  Parametros de la URL:
+    channel=taiki_02        canal de Twitch (opcional)
+    kick=taikidisi          canal de Kick (opcional)
+    kickid=123456           ID del chatroom de Kick (recomendado, ver instrucciones)
+    engine=google|browser   voz de Google (default) o la del navegador
+    lang=es                 idioma de la voz
+    rate=1                  velocidad
+    volume=1                volumen (0 a 1)
+    user=1                  si es 1, dice "usuario dice ..." antes del mensaje
+    ignore=a,b,c            usuarios extra a ignorar (bots)
+    maxlen=200              largo maximo del mensaje leido
+    queue=15                maximo de mensajes en cola
+    debug=1                 muestra estado de conexion
+*/
+const P = new URLSearchParams(location.search);
+const twitchCh = (P.get('channel') || '').toLowerCase().replace(/^@/, '');
+const kickCh   = (P.get('kick') || '').toLowerCase();
+let   kickId   = P.get('kickid') || '';
+const engine   = (P.get('engine') || 'google').toLowerCase();
+const lang     = P.get('lang') || 'es';
+const rate     = parseFloat(P.get('rate') || '1') || 1;
+const vol      = Math.min(1, Math.max(0, parseFloat(P.get('volume') || '1')));
+const readUser = P.get('user') === '1';
+const maxLen   = parseInt(P.get('maxlen') || '200', 10) || 200;
+const maxQueue = parseInt(P.get('queue') || '15', 10) || 15;
+const debug    = P.get('debug') === '1';
+
+const BOTS = new Set([
+  'nightbot','streamelements','streamlabs','moobot','fossabot','wizebot','botrix',
+  'kickbot','buttsbot','sery_bot','soundalerts','commanderroot'
+].concat((P.get('ignore') || '').toLowerCase().split(',').map(s => s.trim()).filter(Boolean)));
+
+const stEl = document.getElementById('st');
+function status(msg, force) { if (debug || force) stEl.textContent = msg; }
+
+/* ---------- Cola de voz ---------- */
+const queue = [];
+let speaking = false;
+
+function enqueue(text) {
+  if (queue.length >= maxQueue) queue.shift();
+  queue.push(text);
+  next();
+}
+
+async function next() {
+  if (speaking) return;
+  const t = queue.shift();
+  if (!t) return;
+  speaking = true;
+  try {
+    await Promise.race([
+      engine === 'browser' ? speakBrowser(t) : speakGoogle(t),
+      new Promise(r => setTimeout(r, 20000))
+    ]);
+  } catch (e) {}
+  speaking = false;
+  next();
+}
+
+function speakGoogle(t) {
+  return new Promise(res => {
+    const url = 'https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&tl=' +
+      encodeURIComponent(lang) + '&q=' + encodeURIComponent(t);
+    const a = new Audio(url);
+    a.volume = vol;
+    a.playbackRate = rate;
+    a.onended = res;
+    a.onerror = res;
+    a.play().catch(res);
+  });
+}
+
+function speakBrowser(t) {
+  return new Promise(res => {
+    const u = new SpeechSynthesisUtterance(t);
+    u.lang = lang;
+    u.rate = rate;
+    u.volume = vol;
+    u.onend = res;
+    u.onerror = res;
+    speechSynthesis.speak(u);
+  });
+}
+
+/* ---------- Filtro de mensajes ---------- */
+function handle(user, text) {
+  if (!text) return;
+  const name = (user || '').toLowerCase();
+  if (BOTS.has(name)) return;
+  text = String(text).trim();
+  if (!text || text[0] === '!' || text[0] === '/') return;   // comandos
+  text = text.replace(/https?:\/\/\S+/gi, 'link').replace(/\s+/g, ' ').trim();
+  if (!text) return;
+  if (text.length > maxLen) text = text.slice(0, maxLen);
+  enqueue(readUser && user ? user + ' dice ' + text : text);
+}
+
+/* ---------- Twitch (IRC anonimo, sin login) ---------- */
+function stripTwitchEmotes(msg, emotesTag) {
+  if (!emotesTag) return msg;
+  const chars = Array.from(msg);
+  const ranges = [];
+  emotesTag.split('/').forEach(e => {
+    const parts = e.split(':');
+    if (parts.length < 2) return;
+    parts[1].split(',').forEach(r => {
+      const [a, b] = r.split('-').map(Number);
+      if (!isNaN(a) && !isNaN(b)) ranges.push([a, b]);
+    });
+  });
+  ranges.forEach(([a, b]) => { for (let i = a; i <= b && i < chars.length; i++) chars[i] = ''; });
+  return chars.join('');
+}
+
+function connectTwitch() {
+  const ws = new WebSocket('wss://irc-ws.chat.twitch.tv:443');
+  ws.onopen = () => {
+    ws.send('CAP REQ :twitch.tv/tags');
+    ws.send('PASS SCHMOOPIIE');
+    ws.send('NICK justinfan' + Math.floor(10000 + Math.random() * 80000));
+    ws.send('JOIN #' + twitchCh);
+    status('Twitch conectado: ' + twitchCh);
+  };
+  ws.onmessage = e => {
+    String(e.data).split('\r\n').forEach(line => {
+      if (!line) return;
+      if (line.startsWith('PING')) { ws.send('PONG :tmi.twitch.tv'); return; }
+      const m = line.match(/^(?:@(\S+) )?:([^!]+)![^ ]+ PRIVMSG #\S+ :(.*)$/);
+      if (!m) return;
+      const tags = {};
+      (m[1] || '').split(';').forEach(t => {
+        const i = t.indexOf('=');
+        if (i > 0) tags[t.slice(0, i)] = t.slice(i + 1);
+      });
+      let msg = m[3].replace(/^\u0001ACTION /, '').replace(/\u0001$/, '');
+      msg = stripTwitchEmotes(msg, tags['emotes']);
+      handle(m[2], msg);
+    });
+  };
+  ws.onclose = () => { status('Twitch desconectado, reintentando...'); setTimeout(connectTwitch, 3000); };
+  ws.onerror = () => ws.close();
+}
+
+/* ---------- Kick (Pusher, solo lectura) ---------- */
+async function resolveKickId() {
+  if (kickId) return kickId;
+  const urls = [
+    'https://kick.com/api/v2/channels/' + kickCh,
+    'https://kick.com/api/v1/channels/' + kickCh
+  ];
+  for (const u of urls) {
+    try {
+      const r = await fetch(u);
+      const j = await r.json();
+      if (j && j.chatroom && j.chatroom.id) return String(j.chatroom.id);
+    } catch (e) {}
+  }
+  return '';
+}
+
+async function connectKick() {
+  kickId = await resolveKickId();
+  if (!kickId) {
+    status('Kick: no pude obtener el ID del chat. Agrega &kickid=NUMERO a la URL.', true);
+    return;
+  }
+  const ws = new WebSocket('wss://ws-us2.pusher.com/app/32cbd69e4b950bf97679?protocol=7&client=js&version=8.4.0-rc2&flash=false');
+  ws.onmessage = e => {
+    let d;
+    try { d = JSON.parse(e.data); } catch (x) { return; }
+    if (d.event === 'pusher:connection_established') {
+      ws.send(JSON.stringify({ event: 'pusher:subscribe', data: { auth: '', channel: 'chatrooms.' + kickId + '.v2' } }));
+      status('Kick conectado: ' + kickCh + ' (' + kickId + ')');
+    } else if (d.event === 'pusher:ping') {
+      ws.send(JSON.stringify({ event: 'pusher:pong', data: {} }));
+    } else if (d.event === 'App\\Events\\ChatMessageEvent') {
+      let p;
+      try { p = typeof d.data === 'string' ? JSON.parse(d.data) : d.data; } catch (x) { return; }
+      const msg = String(p.content || '').replace(/\[emote:\d+:[^\]]+\]/g, '');
+      handle(p.sender && p.sender.username, msg);
+    }
+  };
+  ws.onclose = () => { status('Kick desconectado, reintentando...'); setTimeout(connectKick, 3000); };
+  ws.onerror = () => ws.close();
+}
+
+/* ---------- Inicio ---------- */
+if (!twitchCh && !kickCh) {
+  status('Falta ?channel=TU_CANAL_DE_TWITCH y/o &kick=TU_CANAL_DE_KICK', true);
+}
+if (twitchCh) connectTwitch();
+if (kickCh) connectKick();
+</script>
+</body>
+</html>

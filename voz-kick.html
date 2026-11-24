@@ -29,7 +29,9 @@
 const P = new URLSearchParams(location.search);
 const twitchCh = (P.get('channel') || '').toLowerCase().replace(/^@/, '');
 const kickCh   = (P.get('kick') || '').toLowerCase();
-let   kickId   = P.get('kickid') || '';
+// IDs de chat de Kick ya conocidos (asi no hace falta &kickid= en la URL)
+const KICK_IDS = { taikidisi: '125474114' };
+let   kickId   = P.get('kickid') || KICK_IDS[kickCh] || '';
 const engine   = (P.get('engine') || 'google').toLowerCase();
 const lang     = P.get('lang') || 'es';
 const rate     = parseFloat(P.get('rate') || '1') || 1;
@@ -179,13 +181,18 @@ async function connectKick() {
     status('Kick: no pude obtener el ID del chat. Agrega &kickid=NUMERO a la URL.', true);
     return;
   }
-  const ws = new WebSocket('wss://ws-us2.pusher.com/app/32cbd69e4b950bf97679?protocol=7&client=js&version=8.4.0-rc2&flash=false');
+  const ws = new WebSocket('wss://ws-us2.pusher.com/app/32cbd69e4b950bf97679?protocol=7&client=js&version=8.4.0&flash=false');
+  ws.onopen = () => status('Kick: socket abierto, esperando respuesta...');
   ws.onmessage = e => {
     let d;
     try { d = JSON.parse(e.data); } catch (x) { return; }
     if (d.event === 'pusher:connection_established') {
       ws.send(JSON.stringify({ event: 'pusher:subscribe', data: { auth: '', channel: 'chatrooms.' + kickId + '.v2' } }));
-      status('Kick conectado: ' + kickCh + ' (' + kickId + ')');
+      status('Kick: conectado, suscribiendo al chat ' + kickId + '...');
+    } else if (d.event === 'pusher_internal:subscription_succeeded') {
+      status('Kick conectado y escuchando: ' + kickCh + ' (' + kickId + ')');
+    } else if (d.event === 'pusher:error') {
+      status('Kick error: ' + (typeof d.data === 'string' ? d.data : JSON.stringify(d.data)), true);
     } else if (d.event === 'pusher:ping') {
       ws.send(JSON.stringify({ event: 'pusher:pong', data: {} }));
     } else if (d.event === 'App\\Events\\ChatMessageEvent') {
@@ -195,7 +202,7 @@ async function connectKick() {
       handle(p.sender && p.sender.username, msg);
     }
   };
-  ws.onclose = () => { status('Kick desconectado, reintentando...'); setTimeout(connectKick, 3000); };
+  ws.onclose = ev => { status('Kick desconectado (codigo ' + ev.code + (ev.reason ? ': ' + ev.reason : '') + '), reintentando...'); setTimeout(connectKick, 3000); };
   ws.onerror = () => ws.close();
 }
 
